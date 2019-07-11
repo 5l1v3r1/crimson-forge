@@ -43,6 +43,7 @@ import crimson_forge.ssa as ssa
 import crimson_forge.tailor as tailor
 
 import angr
+import boltons.iterutils
 import capstone
 import keystone
 
@@ -132,7 +133,7 @@ class ExecutableSegment(base.Base):
 			self._process_irsb(self.__vex_lift(blob[ins_addr-base:], base=ins_addr))
 
 		# order the blocks by their address
-		self.blocks = _Blocks((addr, self.blocks[addr]) for addr in sorted(self.blocks.keys()))
+		self.__sort_blocks()
 		for block in self.blocks.values():
 			self.vex_instructions.update(block.vex_instructions.items())
 
@@ -141,6 +142,64 @@ class ExecutableSegment(base.Base):
 			if ins_addr not in self.vex_instructions:
 				del self.cs_instructions[ins_addr]
 		self.instructions = _InstructionsProxy(arch, self.cs_instructions, self.blocks)
+		self.__fixup_block_overruns()
+
+	def __fixup_block_overruns(self):
+		def splice_block(blk, address):
+			new_blk = blk.split(address)
+			self.blocks[address] = new_blk
+			self.__sort_blocks()
+			return blk, new_blk
+		def get_overruns():
+			self.__sort_blocks()
+			overruns = collections.deque()
+			for blk1, blk2 in boltons.iterutils.pairwise(self.blocks.values()):
+				if blk2.address < blk1.next_address:
+					overruns.append((blk1, blk2))
+			return overruns
+		overruns = get_overruns()
+		if overruns:
+			logger.warning("Processing %u block overruns", len(overruns))
+		while overruns:
+			blk1, blk2 = overruns.popleft()
+			# the address of where the overrun starts
+			run_start = max(blk1.address, blk2.address)
+			if isinstance(blk1, block.BasicBlock):
+				# get the last instruction that does not overlap with the overrun
+				ins_start = blk1.address
+				for ins in blk1.instructions.values():
+					ins_start = ins.address
+					if ins.next_address >= run_start:
+						break
+				if ins_start != blk1.address:
+					_, blk1 = splice_block(blk1, ins_start)
+				dblk1 = blk1.to_data_block()
+				self.blocks[dblk1.address] = dblk1
+				del ins_start
+			else:
+				if run_start == blk1.address:
+					dblk1 = blk1
+				else:
+					_, dblk1 = splice_block(blk1, run_start)
+			run_end = min(blk1.next_address, blk2.next_address)
+			if isinstance(blk2, block.BasicBlock):
+				ins_end = blk2.next_address
+				for ins in reversed(tuple(blk2.instructions.values())):
+					if ins.address < run_end:
+						break
+					ins_end = ins.address
+				if ins_end != blk2.address and ins_end != blk2.next_address:
+					blk2, _ = splice_block(blk2, ins_end)
+				dblk2 = blk2.to_data_block()
+				self.blocks[dblk2.address] = dblk2
+			else:
+				dblk2 = blk2
+				if run_end != blk2.address:
+					dblk2, _ = splice_block(dblk2, ins_end)
+			# trim dblk1 to remove the overlapping data
+			dblk1.bytes = dblk1.bytes[:dblk2.address - dblk1.address]
+			self.combine_data_blocks(dblk1, dblk2)
+			overruns = get_overruns()
 
 	def __process_irsb_jump(self, jump):
 		# get the parent basic-block which should already exist
@@ -188,6 +247,9 @@ class ExecutableSegment(base.Base):
 				self.blocks[blk.address] = blk
 			blk.bytes += blob
 		return blk
+
+	def __sort_blocks(self):
+		self.blocks = _Blocks((addr, self.blocks[addr]) for addr in sorted(self.blocks.keys()))
 
 	def __vex_lift(self, blob, base=None):
 		base = self.base if base is None else base
@@ -269,6 +331,26 @@ class ExecutableSegment(base.Base):
 	@property
 	def base(self):
 		return self.address
+
+	def combine_data_blocks(self, parent_blk, child_blk):
+		"""
+		Absorb *child_blk* into *parent_blk*, effectively combining the two.
+
+		:param parent_blk: The parent data-block to absorb the child into.
+		:type parent_blk: :py:class:`crimson_forge.block.DataBlock`
+		:param child_blk: The child data-block to abort into the parent.
+		:type child_blk: :py:class:`crimson_forge.block.DataBlock`
+		"""
+		# child_blk is the block to absorb into the parent_blk
+		if not isinstance(parent_blk, block.DataBlock):
+			raise TypeError('argument 2 must be a DataBlock instance')
+		if not isinstance(child_blk, block.DataBlock):
+			raise TypeError('argument 3 must be a DataBlock instance')
+		if parent_blk.next_address != child_blk.address:
+			raise ValueError('the child block is not the direct child of the parent block')
+		parent_blk.bytes += child_blk.bytes
+		if child_blk.address in self.blocks:
+			del self.blocks[child_blk.address]
 
 	@classmethod
 	def from_source(cls, text, arch, base=0x1000):

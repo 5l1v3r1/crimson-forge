@@ -44,25 +44,13 @@ import boltons.iterutils
 
 logger = logging.getLogger('crimson-forge.analysis')
 
-def _absorb_data_block(exec_seg, parent_blk, child_blk):
-	# child_blk is the block to absorb into the parent_blk
-	if not isinstance(parent_blk, block.DataBlock):
-		raise TypeError('argument 2 must be a DataBlock instance')
-	if not isinstance(child_blk, block.DataBlock):
-		raise TypeError('argument 3 must be a DataBlock instance')
-	if parent_blk.next_address != child_blk.address:
-		raise ValueError('the child block is not the direct child of the parent block')
-	parent_blk.bytes += child_blk.bytes
-	if child_blk.address in exec_seg.blocks:
-		del exec_seg.blocks[child_blk.address]
-
 def _basic_to_data_block(exec_seg, blk):
 	logger.info("Converting basic-block at 0x%04x to a data-block", blk.address)
 	blk = blk.to_data_block()
 	prev_blk = exec_seg.blocks.get_previous(blk)
 	if isinstance(prev_blk, block.DataBlock):
 		logger.debug("Absorbing data-block at 0x%04x into data-block at 0x%04x (via cascading)", blk.address, prev_blk.address)
-		_absorb_data_block(exec_seg, prev_blk, blk)
+		exec_seg.combine_data_blocks(prev_blk, blk)
 		blk = prev_blk
 	exec_seg.blocks[blk.address] = blk
 	next_blk = exec_seg.blocks.get_next(blk)
@@ -73,7 +61,7 @@ def _basic_to_data_block(exec_seg, blk):
 			next_blk = next_blk.to_data_block()
 		if isinstance(next_blk, block.DataBlock):
 			logger.debug("Absorbing data-block at 0x%04x into data-block at 0x%04x (via cascading)", next_blk.address, blk.address)
-			_absorb_data_block(exec_seg, blk, next_blk)
+			exec_seg.combine_data_blocks(blk, next_blk)
 		else:
 			break
 		next_blk = exec_seg.blocks.get_next(next_blk)
@@ -239,7 +227,7 @@ def check_block_sizes(exec_seg):
 		corrupted = True
 		logger.error(prefix + message + "(delta: {:+,} bytes)".format(blk.address + blk.size - next_blk.address))
 	if not corrupted:
-		logger.info('all block sizes are correct')
+		logger.info('All block sizes are correct')
 
 def digraph_data_identification_disjoint(exec_seg):
 	logger.info('Analyzing the graph to identify basic-blocks that are not connected to the entry point')

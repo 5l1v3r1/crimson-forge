@@ -41,9 +41,6 @@ import crimson_forge.ir as ir
 import crimson_forge.source as source
 import crimson_forge.ssa as ssa
 
-import graphviz
-import networkx.algorithms
-
 logger = logging.getLogger('crimson-forge.basic-block')
 
 def _path_choice_iterator(choices):
@@ -101,6 +98,16 @@ class DataBlock(BlockBase):
 
 	def source_iter(self):
 		yield from source.raw_bytes(self.bytes)
+
+	def split(self, address):
+		logger.info('Splitting data-block 0x%04x at 0x%04x', self.address, address)
+		if self.address <= address:
+			raise ValueError('can not split on or before the first address')
+		if address >= self.next_address:
+			raise ValueError('can not split past the last address')
+		new_bytes = self.bytes[(self.address - address):]
+		self.bytes = self.bytes[:(self.address - address)]
+		return DataBlock(new_bytes, self.arch, address)
 
 class InstructionsDiGraph(base.DiGraphBase):
 	"""
